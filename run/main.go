@@ -1,12 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 	"time"
-	"database/sql"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "github.com/mattn/go-sqlite3"
@@ -23,7 +23,7 @@ func initDB() {
 		log.Fatal(err)
 	}
 
-	// Проверка существования таблицы
+	// Сначала проверяем существование таблицы
 	var tableExists bool
 	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='users')").Scan(&tableExists)
 	if err != nil {
@@ -31,7 +31,7 @@ func initDB() {
 	}
 
 	if !tableExists {
-		// Создание таблицы с правильной структурой
+		// Создаем таблицу с правильной структурой
 		createTable := `
 		CREATE TABLE users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,7 +39,6 @@ func initDB() {
 			username TEXT,
 			first_name TEXT,
 			last_name TEXT,
-			birthdate TEXT,          -- Дата рождения
 			weekly_km TEXT,
 			trainings_per_week INTEGER,
 			age_group TEXT,
@@ -49,8 +48,6 @@ func initDB() {
 			best_time_42k TEXT,
 			plan_duration INTEGER,
 			delivery_option TEXT,
-			vdot_max REAL,           -- Максимальное значение VDOT
-			vdot_correction REAL,    -- Корректировка для VDOT
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`
 
@@ -58,13 +55,24 @@ func initDB() {
 			log.Fatal("Failed to create table:", err)
 		}
 	} else {
-		// Добавление новых колонок
+		// Добавляем недостающие колонки, если таблица уже существует
 		columnsToAdd := []struct {
 			name       string
 			definition string
 		}{
-			{"vdot_max", "REAL"},            // Добавляем поле для максимального значения VDOT
-			{"vdot_correction", "REAL"},     // Добавляем поле для корректировки VDOT
+			{"username", "TEXT"},
+			{"first_name", "TEXT"},
+			{"last_name", "TEXT"},
+			{"weekly_km", "TEXT"},
+			{"trainings_per_week", "INTEGER"},
+			{"age_group", "TEXT"},
+			{"best_time_5k", "TEXT"},
+			{"best_time_10k", "TEXT"},
+			{"best_time_21k", "TEXT"},
+			{"best_time_42k", "TEXT"},
+			{"plan_duration", "INTEGER"},
+			{"delivery_option", "TEXT"},
+			{"created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
 		}
 
 		for _, column := range columnsToAdd {
@@ -87,26 +95,17 @@ func saveUserData(chatID int64) error {
 		data["created_at"] = time.Now()
 	}
 
-	// Проверка на пустое значение для vdot_max и vdot_correction (можно задать дефолтное значение, если нужно)
-	if _, ok := data["vdot_max"]; !ok {
-		data["vdot_max"] = 40.0 // Значение по умолчанию для VDOT
-	}
-	if _, ok := data["vdot_correction"]; !ok {
-		data["vdot_correction"] = 0.0 // Значение по умолчанию для корректировки VDOT
-	}
-
 	_, err := db.Exec(`
 		INSERT OR REPLACE INTO users (
 			chat_id, username, first_name, last_name,
-			birthdate, weekly_km, trainings_per_week, age_group,
+			weekly_km, trainings_per_week, age_group,
 			best_time_5k, best_time_10k, best_time_21k, best_time_42k,
-			plan_duration, delivery_option, vdot_max, vdot_correction, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			plan_duration, delivery_option, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		chatID,
 		data["username"],
 		data["first_name"],
 		data["last_name"],
-		data["birthdate"],      // Дата рождения
 		data["weekly_km"],
 		data["trainings_per_week"],
 		data["age_group"],
@@ -116,8 +115,6 @@ func saveUserData(chatID int64) error {
 		data["best_time_42k"],
 		data["plan_duration"],
 		data["delivery_option"],
-		data["vdot_max"],       // Максимальное значение VDOT
-		data["vdot_correction"],// Корректировка для VDOT
 		data["created_at"],
 	)
 
@@ -132,13 +129,13 @@ func validateTimeFormat(timeStr string) bool {
 		return true
 	}
 
-	// Проверка формата MM:SS
+	// Проверяем формат MM:SS
 	_, err := time.Parse("04:05", timeStr)
 	if err == nil {
 		return true
 	}
 
-	// Проверка формата HH:MM:SS для марафона
+	// Проверяем формат HH:MM:SS для марафона
 	_, err = time.Parse("15:04:05", timeStr)
 	return err == nil
 }
@@ -149,38 +146,6 @@ func createTimeKeyboard() tgbotapi.ReplyKeyboardMarkup {
 			tgbotapi.NewKeyboardButton("Я не знаю"),
 		),
 	)
-}
-
-func handleCallback(bot *tgbotapi.BotAPI, callback *tgbotapi.CallbackQuery) {
-	chatID := callback.Message.Chat.ID
-	data := callback.Data
-
-	state := userData[chatID]
-
-	log.Printf("[Callback] chatID=%d, data=%s", chatID, data)
-
-	// Обрабатываем нажатие кнопок
-	switch data {
-	case "download_plan":
-		if state["plan_text"] == nil {
-			bot.Send(tgbotapi.NewMessage(chatID, "План пока не сформирован. Пожалуйста, завершите ввод данных."))
-			return
-		}
-		// Здесь будет код для генерации и отправки PDF
-		bot.Send(tgbotapi.NewMessage(chatID, "Ваш план будет готов через несколько минут..."))
-	case "subscribe_weekly":
-		if state["subscribed"] != nil && state["subscribed"] == true {
-			bot.Send(tgbotapi.NewMessage(chatID, "Вы уже подписаны на еженедельную рассылку."))
-			return
-		}
-		state["subscribed"] = true
-		state["subscribe_time"] = time.Now()
-		saveUserData(chatID)
-		bot.Send(tgbotapi.NewMessage(chatID, "Вы успешно подписались на еженедельную рассылку!"))
-		return
-	default:
-		// Остальная логика для обработки выбора данных
-	}
 }
 
 func main() {
@@ -221,7 +186,6 @@ func main() {
 			}
 		}
 
-		// Основная логика бота
 		switch userState[chatID] {
 		case "":
 			if strings.ToLower(text) == "привет" || strings.ToLower(text) == "/start" {
@@ -313,6 +277,140 @@ func main() {
 			msg.ReplyMarkup = createTimeKeyboard()
 			userState[chatID] = "awaiting_best_time_5k"
 			bot.Send(msg)
+
+		case "awaiting_best_time_5k":
+			if !validateTimeFormat(text) {
+				msg := tgbotapi.NewMessage(chatID, "Пожалуйста, введите время в формате ММ:СС (например, 25:30) или нажмите «Я не знаю».")
+				msg.ReplyMarkup = createTimeKeyboard()
+				bot.Send(msg)
+				continue
+			}
+
+			userData[chatID]["best_time_5k"] = text
+
+			// Пятый вопрос
+			msg := tgbotapi.NewMessage(chatID, "Ваше лучшее время на дистанции 10 км? (в формате ММ:СС или нажмите «Я не знаю»)")
+			msg.ReplyMarkup = createTimeKeyboard()
+			userState[chatID] = "awaiting_best_time_10k"
+			bot.Send(msg)
+
+		case "awaiting_best_time_10k":
+			if !validateTimeFormat(text) {
+				msg := tgbotapi.NewMessage(chatID, "Пожалуйста, введите время в формате ММ:СС (например, 52:15) или нажмите «Я не знаю».")
+				msg.ReplyMarkup = createTimeKeyboard()
+				bot.Send(msg)
+				continue
+			}
+
+			userData[chatID]["best_time_10k"] = text
+
+			// Шестой вопрос
+			msg := tgbotapi.NewMessage(chatID, "Ваше лучшее время на дистанции 21 км (полумарафон)? (в формате ЧЧ:ММ:СС или нажмите «Я не знаю»)")
+			msg.ReplyMarkup = createTimeKeyboard()
+			userState[chatID] = "awaiting_best_time_21k"
+			bot.Send(msg)
+
+		case "awaiting_best_time_21k":
+			if !validateTimeFormat(text) {
+				msg := tgbotapi.NewMessage(chatID, "Пожалуйста, введите время в формате ЧЧ:ММ:СС (например, 1:45:30) или нажмите «Я не знаю».")
+				msg.ReplyMarkup = createTimeKeyboard()
+				bot.Send(msg)
+				continue
+			}
+
+			userData[chatID]["best_time_21k"] = text
+
+			// Седьмой вопрос
+			msg := tgbotapi.NewMessage(chatID, "Ваше лучшее время на дистанции 42 км (марафон)? (в формате ЧЧ:ММ:СС или нажмите «Я не знаю»)")
+			msg.ReplyMarkup = createTimeKeyboard()
+			userState[chatID] = "awaiting_best_time_42k"
+			bot.Send(msg)
+
+		case "awaiting_best_time_42k":
+			if !validateTimeFormat(text) {
+				msg := tgbotapi.NewMessage(chatID, "Пожалуйста, введите время в формате ЧЧ:ММ:СС (например, 3:45:30) или нажмите «Я не знаю».")
+				msg.ReplyMarkup = createTimeKeyboard()
+				bot.Send(msg)
+				continue
+			}
+
+			userData[chatID]["best_time_42k"] = text
+
+			// Восьмой вопрос
+			msg := tgbotapi.NewMessage(chatID, "На какой срок пишем план (в месяцах)?")
+			msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
+				tgbotapi.NewKeyboardButtonRow(
+					tgbotapi.NewKeyboardButton("1"),
+					tgbotapi.NewKeyboardButton("2"),
+					tgbotapi.NewKeyboardButton("3"),
+				),
+				tgbotapi.NewKeyboardButtonRow(
+					tgbotapi.NewKeyboardButton("4"),
+					tgbotapi.NewKeyboardButton("5"),
+					tgbotapi.NewKeyboardButton("6"),
+				),
+			)
+			userState[chatID] = "awaiting_plan_duration"
+			bot.Send(msg)
+
+		case "awaiting_plan_duration":
+			validOptions := map[string]bool{"1": true, "2": true, "3": true, "4": true, "5": true, "6": true}
+			if !validOptions[text] {
+				msg := tgbotapi.NewMessage(chatID, "Пожалуйста, выберите число от 1 до 6.")
+				bot.Send(msg)
+				continue
+			}
+
+			userData[chatID]["plan_duration"] = text
+
+			// Девятый вопрос
+			msg := tgbotapi.NewMessage(chatID, "Хотите скачать план или подписаться на рассылку?")
+			msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
+				tgbotapi.NewKeyboardButtonRow(
+					tgbotapi.NewKeyboardButton("Скачать план"),
+					tgbotapi.NewKeyboardButton("Подписаться на рассылку"),
+				),
+			)
+			userState[chatID] = "awaiting_delivery_option"
+			bot.Send(msg)
+
+		case "awaiting_delivery_option":
+			validOptions := map[string]bool{"Скачать план": true, "Подписаться на рассылку": true}
+			if !validOptions[text] {
+				msg := tgbotapi.NewMessage(chatID, "Пожалуйста, выберите один из предложенных вариантов.")
+				bot.Send(msg)
+				continue
+			}
+
+			userData[chatID]["delivery_option"] = text
+
+			// Сохраняем все данные
+			if err := saveUserData(chatID); err != nil {
+				msg := tgbotapi.NewMessage(chatID, "Ошибка при сохранении данных. Пожалуйста, попробуйте позже.")
+				bot.Send(msg)
+				log.Printf("Error saving user data: %v", err)
+				continue
+			}
+
+			// Завершение опроса
+			msg := tgbotapi.NewMessage(chatID, "Спасибо! Ваши ответы сохранены.")
+			msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
+			bot.Send(msg)
+
+			// Здесь можно добавить логику для генерации плана или подписки
+			if text == "Скачать план" {
+				// Генерация и отправка плана
+				msg := tgbotapi.NewMessage(chatID, "Ваш план будет готов через несколько минут...")
+				bot.Send(msg)
+			} else {
+				// Подписка на рассылку
+				msg := tgbotapi.NewMessage(chatID, "Вы подписаны на еженедельную рассылку тренировочных планов!")
+				bot.Send(msg)
+			}
+
+			// Сброс состояния
+			delete(userState, chatID)
+			delete(userData, chatID)
 		}
 	}
 }
